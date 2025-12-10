@@ -1,12 +1,38 @@
-(async () => {
+// ==UserScript==
+// @name         Instagram auto-unlike liked posts (100-per-batch)
+// @namespace    ig-bulk-unlike
+// @version      1.0
+// @description  Auto select + unlike liked posts in batches of 100, auto-reload between batches.
+// @match        https://www.instagram.com/your_activity/interactions/likes/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
   const CLICK_DELAY_MS    = 200;   // delay between selecting posts
   const LOAD_DELAY_MS     = 2000;  // delay after scroll to let new rows load
-  const STABLE_LIMIT      = 3;     // "no new work" loops before end-of-list
-  const BATCH_LIMIT       = 100;   // Instagram selection cap per batch
-  const EXTRA_AFTER_TOAST = 2000;  // extra wait after seeing "You unliked ..." toast
-  const REENTER_SELECT_MS = 1500;  // wait after clicking Select again
+  const STABLE_LIMIT      = 3;     // "no new work" loops before end-of-list in this load
+  const BATCH_LIMIT       = 100;   // Instagram max selection
+  const AFTER_TOAST_EXTRA = 2000;  // extra delay after toast appears
 
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function log(...args) {
+    console.log('[IG-Unliker]', ...args);
+  }
+
+  function findSelectButton() {
+    const spans = Array.from(document.querySelectorAll('span'));
+    for (const span of spans) {
+      if (span.textContent.trim() === 'Select') {
+        const parent = span.closest('div[style*="cursor: pointer"]') || span.parentElement;
+        return parent || span;
+      }
+    }
+    return null;
+  }
 
   function findBulkUnlikeButton() {
     const candidates = Array.from(
@@ -33,62 +59,45 @@
     return null;
   }
 
-  // Find the "Select" control (blue text "Select")
-  function findSelectButton() {
-    const spans = Array.from(document.querySelectorAll('span'));
-    for (const span of spans) {
-      if (span.textContent.trim() === 'Select') {
-        // Prefer the flexbox div that has cursor: pointer
-        const parent = span.closest('div[style*="cursor: pointer"]') || span.parentElement;
-        return parent || span;
-      }
-    }
-    return null;
-  }
-
-  // Wait until an IG toast that starts with "You unliked" appears
-  async function waitForUnlikeToast(timeoutMs = 60000) {
+  async function waitForUnlikeToast(timeoutMs = 60) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const candidates = Array.from(
         document.querySelectorAll('p._abmp, div[role="alert"]')
       );
-      const toast = candidates.find(el =>
+      const toast = candidates.find((el) =>
         el.textContent.trim().toLowerCase().startsWith('you unliked')
       );
       if (toast) {
-        console.log('🔔 Detected toast:', toast.textContent.trim());
+        log('Toast detected:', toast.textContent.trim());
         return true;
       }
-      await sleep(500);
+      await sleep(50);
     }
-    console.log('⏱️ Toast not detected within timeout, continuing anyway.');
+    log('Toast not detected in time; continuing anyway.');
     return false;
   }
 
-  // Select up to BATCH_LIMIT *new* unchecked posts.
-  // Returns { selectedInBatch, endOfList }.
+  // Select up to BATCH_LIMIT new unchecked posts
   async function selectBatch() {
     let totalNewlySelected = 0;
     let lastTotalBoxes = 0;
     let stableRounds = 0;
 
-    console.log('▶ Starting new selection batch…');
+    log('Starting new selection batch…');
 
     while (true) {
       const boxes = Array.from(
         document.querySelectorAll('[data-testid="bulk_action_checkbox"]')
       );
 
-      console.log(
-        `🧾 Boxes in DOM: ${boxes.length}, selected in this batch: ${totalNewlySelected}`
-      );
+      log(`Boxes: ${boxes.length}, selected this batch: ${totalNewlySelected}`);
 
       let selectedThisRound = 0;
 
       for (const box of boxes) {
         if (totalNewlySelected >= BATCH_LIMIT) {
-          console.log(`⛔ Reached batch limit of ${BATCH_LIMIT}.`);
+          log(`Reached batch limit of ${BATCH_LIMIT}.`);
           break;
         }
 
@@ -118,7 +127,7 @@
 
         totalNewlySelected++;
         selectedThisRound++;
-        console.log(`✅ Newly selected post ${totalNewlySelected} in this batch`);
+        log(`Selected post ${totalNewlySelected} in this batch`);
         await sleep(CLICK_DELAY_MS);
       }
 
@@ -128,9 +137,7 @@
 
       if (boxes.length === lastTotalBoxes && selectedThisRound === 0) {
         stableRounds++;
-        console.log(
-          `⚖️ No new selectable posts this loop. Stable rounds: ${stableRounds}/${STABLE_LIMIT}`
-        );
+        log(`No new posts this loop. Stable rounds: ${stableRounds}/${STABLE_LIMIT}`);
       } else {
         stableRounds = 0;
       }
@@ -138,76 +145,81 @@
       lastTotalBoxes = boxes.length;
 
       if (stableRounds >= STABLE_LIMIT) {
-        console.log(
-          `🏁 No new unchecked posts after ${STABLE_LIMIT} checks. Selected ${totalNewlySelected} posts in this batch.`
+        log(
+          `No new unchecked posts after ${STABLE_LIMIT} checks. Selected ${totalNewlySelected} posts in this batch.`
         );
         return { selectedInBatch: totalNewlySelected, endOfList: true };
       }
 
-      console.log('↘ Scrolling to bottom for more posts in this batch…');
       window.scrollTo(0, document.documentElement.scrollHeight);
       await sleep(LOAD_DELAY_MS);
     }
   }
 
-  let totalUnliked = 0;
+  async function runOnceOnThisPage() {
+    log('Waiting for Select button…');
 
-  while (true) {
+    // Wait until Instagram renders the Select button
+    let tries = 0;
+    while (tries < 30) {
+      const selectBtn = findSelectButton();
+      if (selectBtn) {
+        selectBtn.click();
+        log('Clicked "Select", starting main loop.');
+        break;
+      }
+      tries++;
+      await sleep(1000);
+    }
+
     const { selectedInBatch, endOfList } = await selectBatch();
 
     if (selectedInBatch === 0) {
-      console.log('✨ No more posts to select in this batch.');
-      break;
+      log('No posts selected on this page. Stopping.');
+      return;
     }
 
-    console.log(`🟦 Batch selected: ${selectedInBatch} posts.`);
+    log(`Batch selected: ${selectedInBatch} posts.`);
 
     const bulkUnlike = findBulkUnlikeButton();
     if (!bulkUnlike) {
-      console.log('❌ Could not find bulk "Unlike" button. Stopping.');
-      break;
+      log('Bulk "Unlike" button not found; stopping.');
+      return;
     }
 
     bulkUnlike.scrollIntoView({ block: 'center' });
     bulkUnlike.click();
-    console.log('💔 Clicked bulk "Unlike"… waiting for popup.');
+    log('Clicked bulk "Unlike", waiting for popup…');
 
-    await sleep(1500); // let popup appear
+    await sleep(1500);
 
     const popupUnlike = findPopupUnlikeButton();
     if (popupUnlike) {
       popupUnlike.click();
-      console.log('✅ Clicked popup "Unlike". Waiting for toast…');
+      log('Clicked popup "Unlike", waiting for toast…');
     } else {
-      console.log('⚠️ Popup "Unlike" button not found (maybe IG skipped the popup?).');
+      log('Popup "Unlike" not found (maybe skipped).');
     }
 
     await waitForUnlikeToast();
-    await sleep(EXTRA_AFTER_TOAST);
+    await sleep(AFTER_TOAST_EXTRA);
 
-    totalUnliked += selectedInBatch;
-    console.log(`📉 Total posts unliked so far: ${totalUnliked}`);
+    log(`Finished unliking this batch of ${selectedInBatch} posts.`);
 
-    // If we know we’re at the end AND this batch was < 100, we’re really done
-    if (endOfList && selectedInBatch < BATCH_LIMIT) {
-      console.log('🏁 Reached end of liked posts list.');
-      break;
-    }
-
-    // Re-enter Select mode for the next batch
-    const selectBtn = findSelectButton();
-    if (selectBtn) {
-      selectBtn.scrollIntoView({ block: 'center' });
-      selectBtn.click();
-      console.log('🟦 Re-entered "Select" mode for next batch.');
-      await sleep(REENTER_SELECT_MS);
+    // If we unliked 100 (or more, theoretically), assume IG limit
+    // → hard reload and let the userscript run again on the next page load.
+    if (selectedInBatch >= BATCH_LIMIT && !endOfList) {
+      log('Batch was full (100). Reloading page for next batch…');
     } else {
-      console.log('⚠️ Could not find "Select" button to start next batch. Stopping.');
-      break;
+      log('Last batch was < 100 or end of list detected. Stopping.');
     }
-
-    console.log('🔁 Starting next batch…');
+    location.reload();
   }
 
-  console.log(`✅ DONE. Total posts unliked: ${totalUnliked}`);
+  // Kick off when DOM is ready
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    runOnceOnThisPage();
+  } else {
+    window.addEventListener('DOMContentLoaded', runOnceOnThisPage);
+  }
 })();
